@@ -1,0 +1,30 @@
+# 构建产物
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Arduino 编译产物
+*.bin
+*.elf
+*.map
+*.hex
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.log
+*.bak
