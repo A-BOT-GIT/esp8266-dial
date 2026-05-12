@@ -1,9 +1,10 @@
 """
-ESP8266 Dial Listener — 双模式接收版
+ESP8266 Dial Listener — 双模式接收版（带托盘图标）
 
 - SerialReader 线程：扫描 COM 口 → 打开串口 → 回 ACK → 解析 >EVENT
 - UDPReader 线程：监听 UDP 8888 → 解析 JSON action
 - 两者共享 KEY_MAP 动作映射，行为一致
+- 主线程运行 pystray 托盘图标（右键菜单 / 动态状态色）
 - 无黑窗口后台运行（配合 pyinstaller --noconsole 打包）
 """
 
@@ -11,7 +12,9 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -25,6 +28,14 @@ try:
     import serial.tools.list_ports
 except ImportError:
     serial = None  # pyserial 未安装则只走 UDP
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+except ImportError:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
 # ── Windows 控制台 QuickEdit 禁用（--console 打包时才用到） ──
 if sys.platform == "win32" and sys.stdout is not None and sys.stdout.isatty():
@@ -76,16 +87,75 @@ log = logging.getLogger("dial")
 
 
 # ── 按键映射 ────────────────────────────────────────────
-# 键是动作名（有线/无线事件都会转为此名），值是 (pynput Key, 描述)
 KEY_MAP = {
     "left":      (Key.media_volume_down, "音量减小"),
     "right":     (Key.media_volume_up,   "音量增大"),
     "press":     (Key.media_play_pause,  "播放/暂停"),
-    "longpress": (None,                   "Win+D 回到桌面"),  # 特殊处理
+    "longpress": (None,                   "Win+D 回到桌面"),
 }
 
 UDP_IP   = "0.0.0.0"
 UDP_PORT = 8888
+
+
+# ── 全局状态（给托盘图标用） ───────────────────────────
+class State:
+    """线程安全的设备状态快照"""
+
+    MODE_DISCONNECTED = "未连接"
+    MODE_WIRED        = "有线"
+    MODE_WIRELESS     = "无线"
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.mode = State.MODE_DISCONNECTED
+        self.last_event = "—"
+        self.last_event_time = 0.0
+        self.event_count = 0
+        self.tray_icon = None   # 由 main 注入
+
+    def set_mode(self, mode: str):
+        with self._lock:
+            if self.mode == mode:
+                return
+            self.mode = mode
+        log.info("状态变更: %s", mode)
+        # 模式变更：重绘图标 + 更新菜单
+        self._refresh_icon()
+        self._refresh_menu()
+
+    def record_event(self, action: str):
+        with self._lock:
+            self.last_event = action
+            self.last_event_time = time.time()
+            self.event_count += 1
+        # 事件只更新菜单文本，不重绘图标（避免高频旋转时 UI 拥塞）
+        self._refresh_menu()
+
+    def snapshot(self):
+        with self._lock:
+            return (self.mode, self.last_event, self.event_count)
+
+    def _refresh_icon(self):
+        if self.tray_icon is None:
+            return
+        try:
+            self.tray_icon.icon = _make_icon_image(self.mode)
+            self.tray_icon.title = f"ESP8266 Dial — {self.mode}"
+        except Exception as e:
+            log.debug("刷新托盘图标失败: %s", e)
+
+    def _refresh_menu(self):
+        if self.tray_icon is None:
+            return
+        try:
+            if hasattr(self.tray_icon, "update_menu"):
+                self.tray_icon.update_menu()
+        except Exception as e:
+            log.debug("刷新托盘菜单失败: %s", e)
+
+
+STATE = State()
 
 
 # ── 动作执行 ────────────────────────────────────────────
@@ -100,6 +170,7 @@ class ActionRunner:
                 if action == "longpress":
                     log.info("[%s] longpress → Win+D 回到桌面", source)
                     self._win_d()
+                    STATE.record_event("longpress")
                     return
                 if action in KEY_MAP:
                     key, desc = KEY_MAP[action]
@@ -107,6 +178,7 @@ class ActionRunner:
                     if key is not None:
                         self.keyboard.press(key)
                         self.keyboard.release(key)
+                    STATE.record_event(action)
                 else:
                     log.warning("[%s] 未知动作: %s", source, action)
             except Exception as e:
@@ -121,15 +193,8 @@ class ActionRunner:
 
 # ── 串口接收 ────────────────────────────────────────────
 class SerialReader(threading.Thread):
-    """
-    扫描可用串口，打开后阻塞读取 >EVENT 行。
-    遇到 >HELLO / >PING 自动回 ACK。
-    """
-
-    # 串口 VID/描述特征（常见 ESP8266 USB 转串口芯片）
     PORT_HINTS = ("CH340", "CH341", "CP210", "FTDI", "USB-SERIAL", "wchusbserial")
 
-    # 事件正则
     RE_RIGHT = re.compile(r"^>RIGHT\s+pos=(-?\d+)")
     RE_LEFT  = re.compile(r"^>LEFT\s+pos=(-?\d+)")
     RE_PRESS = re.compile(r"^>PRESS\s+#(\d+)")
@@ -155,7 +220,7 @@ class SerialReader(threading.Thread):
             port = self._find_port()
             if port is None:
                 scan_count += 1
-                if scan_count % 15 == 1:  # 每 30 秒提示一次
+                if scan_count % 15 == 1:
                     log.info("未检测到 ESP8266 串口，继续扫描...")
                 self._stop.wait(2.0)
                 continue
@@ -166,13 +231,13 @@ class SerialReader(threading.Thread):
                 self._ser = serial.Serial(
                     port=port,
                     baudrate=115200,
-                    timeout=None,   # 阻塞读，不轮询
+                    timeout=None,
                     write_timeout=1.0,
                 )
-                # 关闭 DTR/RTS 避免触发 ESP 复位
                 self._ser.dtr = False
                 self._ser.rts = False
                 log.info("串口已连接 %s", port)
+                # 连上串口但模式未知，等到收到 >MODE 再更新
                 self._read_loop()
             except serial.SerialException as e:
                 log.info("串口 %s 异常: %s", port, e)
@@ -186,6 +251,9 @@ class SerialReader(threading.Thread):
                         pass
                     self._ser = None
                 log.info("串口已关闭，2 秒后重新扫描")
+                # 失去有线连接，但 UDP 还能收 → 如果处于 WIRED 就降级到 DISCONNECTED
+                if STATE.mode == State.MODE_WIRED:
+                    STATE.set_mode(State.MODE_DISCONNECTED)
                 self._stop.wait(2.0)
 
     def _find_port(self):
@@ -202,17 +270,22 @@ class SerialReader(threading.Thread):
         ser = self._ser
         assert ser is not None
         buf = b""
+        MAX_BUF = 8192  # 防止对端狂发无 \n 的垃圾导致内存膨胀
         while not self._stop.is_set():
             try:
-                chunk = ser.read(1)   # 阻塞，来一个字节返回
+                chunk = ser.read(1)
             except serial.SerialException:
                 raise
             if not chunk:
                 continue
             buf += chunk
-            # 批量读完当前缓冲
             if ser.in_waiting:
                 buf += ser.read(ser.in_waiting)
+
+            if len(buf) > MAX_BUF:
+                log.warning("串口缓冲溢出（%d 字节），丢弃", len(buf))
+                buf = b""
+                continue
 
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
@@ -222,7 +295,6 @@ class SerialReader(threading.Thread):
                 self._handle_line(line)
 
     def _handle_line(self, line: str):
-        # 握手：HELLO / PING 立即回 ACK
         if line.startswith(">HELLO") or line.startswith(">PING"):
             try:
                 self._ser.write(b"ACK\n")
@@ -232,12 +304,15 @@ class SerialReader(threading.Thread):
 
         if line.startswith(">MODE"):
             log.info("设备切换: %s", line)
+            if "wired" in line:
+                STATE.set_mode(State.MODE_WIRED)
+            elif "wireless" in line:
+                STATE.set_mode(State.MODE_WIRELESS)
             return
 
         if line.startswith(">STATUS") or line.startswith(">BOOT"):
-            return  # 忽略状态行
+            return
 
-        # 事件解析
         if self.RE_RIGHT.match(line):
             self.runner.run("right", "serial")
         elif self.RE_LEFT.match(line):
@@ -247,7 +322,7 @@ class SerialReader(threading.Thread):
         elif self.RE_LONG.match(line):
             self.runner.run("longpress", "serial")
         elif line.startswith(">DOWN") or line.startswith(">UP") or line.startswith(">HOLD"):
-            pass   # DOWN/UP/HOLD 不触发动作
+            pass
         else:
             log.debug("未解析行: %s", line)
 
@@ -281,7 +356,7 @@ class UDPReader(threading.Thread):
             log.error("UDP 端口 %d 绑定失败: %s", UDP_PORT, e)
             return
 
-        self._sock.settimeout(None)   # 阻塞读
+        self._sock.settimeout(None)
         log.info("UDP 监听 %d", UDP_PORT)
 
         while not self._stop.is_set():
@@ -301,7 +376,106 @@ class UDPReader(threading.Thread):
 
             action = payload.get("action", "")
             if action:
+                # UDP 收到事件 → 当前一定是 WIRELESS 模式
+                if STATE.mode != State.MODE_WIRELESS:
+                    STATE.set_mode(State.MODE_WIRELESS)
                 self.runner.run(action, f"udp:{addr[0]}")
+
+
+# ── 托盘图标 ────────────────────────────────────────────
+_MODE_COLOR = {
+    State.MODE_DISCONNECTED: (136, 136, 136),  # 灰
+    State.MODE_WIRED:        (0,   170, 0),    # 绿
+    State.MODE_WIRELESS:     (0,   102, 255),  # 蓝
+}
+
+
+def _make_icon_image(mode: str):
+    """生成一张 64x64 的单色圆形图标"""
+    if Image is None:
+        return None
+    color = _MODE_COLOR.get(mode, (136, 136, 136))
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((4, 4, 60, 60), fill=color + (255,), outline=(255, 255, 255, 230), width=3)
+    # 中心画 D
+    try:
+        from PIL import ImageFont
+        # PIL 默认字体可能不够大，用 load_default 就行
+        font = ImageFont.load_default()
+        draw.text((22, 18), "D", fill=(255, 255, 255, 255), font=font)
+    except Exception:
+        pass
+    return img
+
+
+def _open_log_file(icon=None, item=None):
+    """右键菜单：打开日志文件"""
+    path = str(_log_dir() / "dial.log")
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        log.error("打开日志失败: %s", e)
+
+
+def _open_log_dir(icon=None, item=None):
+    """右键菜单：打开日志目录"""
+    path = str(_log_dir())
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        log.error("打开日志目录失败: %s", e)
+
+
+def _quit_app(icon, item=None):
+    log.info("用户通过托盘退出")
+    icon.visible = False
+    icon.stop()
+
+
+def _build_tray_icon():
+    """构造托盘图标（需要在主线程调用 icon.run()）"""
+    if pystray is None:
+        log.warning("pystray 未安装，托盘图标禁用")
+        return None
+
+    def _mode_label(_item=None):
+        mode, last, count = STATE.snapshot()
+        return f"模式: {mode}"
+
+    def _event_label(_item=None):
+        _, last, count = STATE.snapshot()
+        if count == 0:
+            return "最近事件: —"
+        return f"最近: {last}  (#{count})"
+
+    menu = pystray.Menu(
+        pystray.MenuItem(_mode_label, None, enabled=False),
+        pystray.MenuItem(_event_label, None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("打开日志文件", _open_log_file),
+        pystray.MenuItem("打开日志目录", _open_log_dir),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("退出", _quit_app),
+    )
+
+    icon = pystray.Icon(
+        "dial_listener",
+        icon=_make_icon_image(STATE.mode),
+        title="ESP8266 Dial — 未连接",
+        menu=menu,
+    )
+    return icon
 
 
 # ── 主入口 ──────────────────────────────────────────────
@@ -316,24 +490,49 @@ def main():
         log.info("  %-10s → %s", a, d)
 
     runner = ActionRunner()
-
     sr = SerialReader(runner)
     ur = UDPReader(runner)
 
     sr.start()
     ur.start()
 
-    try:
-        while sr.is_alive() or ur.is_alive():
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        log.info("收到退出信号")
-    finally:
-        sr.stop()
-        ur.stop()
-        sr.join(timeout=2)
-        ur.join(timeout=2)
-        log.info("已退出")
+    icon = _build_tray_icon()
+    STATE.tray_icon = icon
+
+    if icon is not None:
+        # Windows 下 pystray 的消息泵会吞 Ctrl+C，主动注册信号处理器
+        def _sig_handler(sig, _frame):
+            log.info("收到信号 %s，触发退出", sig)
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+        try:
+            signal.signal(signal.SIGINT, _sig_handler)
+            if hasattr(signal, "SIGTERM"):
+                signal.signal(signal.SIGTERM, _sig_handler)
+        except Exception as e:
+            log.debug("注册信号处理器失败（非主线程?）: %s", e)
+
+        try:
+            icon.run()
+        except KeyboardInterrupt:
+            log.info("收到 Ctrl+C（fallback）")
+    else:
+        # 没有 pystray，退化成轮询等线程
+        try:
+            while sr.is_alive() or ur.is_alive():
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            log.info("收到 Ctrl+C")
+
+    log.info("正在退出...")
+    sr.stop()
+    ur.stop()
+    sr.join(timeout=2)
+    ur.join(timeout=2)
+    log.info("已退出")
 
 
 if __name__ == "__main__":
