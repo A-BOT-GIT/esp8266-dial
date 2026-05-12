@@ -1,4 +1,4 @@
-# ESP8266 Dial v2 — 双模式正式固件
+# ESP8266 Dial — 双模式正式固件
 
 ## 功能
 
@@ -20,14 +20,14 @@ EC11 GND ── GND
 
 ## 文件
 
-- `esp8266_dial_v2.ino` — 主程序（模式状态机 + 握手）
+- `esp8266_dial.ino` — 主程序（模式状态机 + 握手）
 - `encoder.h / .cpp` — 编码器 + 按键状态机
 - `wifi_module.h / .cpp` — WiFi AP + UDP + Web 控制页
 
 ## 烧录
 
 ### Arduino IDE
-板型：`NodeMCU 1.0 (ESP-12E Module)`，打开 `esp8266_dial_v2.ino` → 上传
+板型：`NodeMCU 1.0 (ESP-12E Module)`，打开 `esp8266_dial.ino` → 上传
 
 ### arduino-cli
 ```bash
@@ -40,7 +40,7 @@ arduino-cli upload  --fqbn esp8266:esp8266:nodemcuv2 --port /dev/ttyUSB0 .
 arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 --output-dir /tmp/build .
 python esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
   --before default_reset --after hard_reset \
-  write_flash 0x0 /tmp/build/esp8266_dial_v2.ino.bin
+  write_flash 0x0 /tmp/build/esp8266_dial.ino.bin
 ```
 
 ## PC 端配合

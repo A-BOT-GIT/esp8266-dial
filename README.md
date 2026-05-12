@@ -1,4 +1,4 @@
-# ESP8266 Dial v2
+# ESP8266 Dial
 
 基于 ESP8266 NodeMCU 的类 Microsoft Surface Dial 旋钮控制器，支持**有线/无线自动切换**。
 
@@ -61,8 +61,8 @@ EC11 GND ── GND
 ```
 esp8266-dial/
 ├── firmware/
-│   └── esp8266_dial_v2/
-│       ├── esp8266_dial_v2.ino      主程序（模式状态机 + 握手）
+│   └── esp8266_dial/
+│       ├── esp8266_dial.ino          主程序（模式状态机 + 握手）
 │       ├── encoder.h / .cpp          编码器 + 按键状态机
 │       ├── wifi_module.h / .cpp      WiFi AP + UDP + Web
 │       ├── PLAN.md                   详细设计
@@ -75,7 +75,7 @@ esp8266-dial/
 │   ├── install_autostart.bat         注册开机自启
 │   ├── uninstall_autostart.bat       取消自启
 │   └── README.md
-└── NOTES_V2.md                       实施笔记
+└── NOTES.md                          实施笔记
 ```
 
 ## 快速开始
@@ -83,8 +83,16 @@ esp8266-dial/
 ### 1. 烧录固件
 
 ```bash
-arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 firmware/esp8266_dial_v2/
-arduino-cli upload  --fqbn esp8266:esp8266:nodemcuv2 --port /dev/ttyUSB0 firmware/esp8266_dial_v2/
+arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 firmware/esp8266_dial/
+arduino-cli upload  --fqbn esp8266:esp8266:nodemcuv2 --port /dev/ttyUSB0 firmware/esp8266_dial/
+```
+
+或者下载 Release 里的 `esp8266_dial.ino.bin`，直接用 esptool 烧：
+
+```bash
+python esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
+  --before default_reset --after hard_reset \
+  write_flash 0x0 esp8266_dial.ino.bin
 ```
 
 ### 2. Windows 端（推荐）
@@ -165,8 +173,8 @@ ESP 广播到 `192.168.4.255:8888`：
 
 ## 相关文档
 
-- [实施笔记](NOTES_V2.md) — 完整开发历程、设计决策、踩坑总结
-- [详细设计](firmware/esp8266_dial_v2/PLAN.md) — 固件设计文档
+- [实施笔记](NOTES.md) — 完整开发历程、设计决策、踩坑总结
+- [详细设计](firmware/esp8266_dial/PLAN.md) — 固件设计文档
 - [PC 端说明](pc-client/README.md) — Windows 部署步骤
 
 ## License

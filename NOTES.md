@@ -1,15 +1,17 @@
-# ESP8266 Dial v2 实施笔记
+# ESP8266 Dial v1.0.0 实施笔记
 
 > 从测试固件到双模式正式固件的完整实施记录
 > 会话 ID：9cc90569-d840-4565-b3dd-218286cb1c08
 
 ## 目标
 
-在现有 v1（WiFi AP + UDP + Web）基础上，做一版能**自动识别接入端类型**的双模式固件：
+在早期 WiFi AP + UDP + Web 原型（下文称"v1 旧固件"）基础上，做一版能**自动识别接入端类型**的双模式固件：
 
 - 接电脑 USB 口 → **有线模式**（USB Serial 低延迟）
 - 接普通 USB 充电器 → **无线模式**（WiFi AP + UDP 广播）
 - 插拔自动切换
+
+最终产物即本仓库发布的 v1.0.0。
 
 ---
 
@@ -43,7 +45,7 @@ ESP8266 → 串口发 >HELLO
 
 ### 3. 启动安全修复
 
-旧固件 `ENC_DT_PIN = D4`，而 D4 (GPIO2) 是 ESP8266 的 **strapping pin**，启动时必须 HIGH。编码器在特定档位会把 DT 拉到 GND，导致芯片无法启动。
+v1 旧固件 `ENC_DT_PIN = D4`，而 D4 (GPIO2) 是 ESP8266 的 **strapping pin**，启动时必须 HIGH。编码器在特定档位会把 DT 拉到 GND，导致芯片无法启动。
 
 **修复**：DT 从 D4 改到 D6 (GPIO12)，D4 释放给板载 LED 做状态指示。
 
@@ -53,7 +55,7 @@ ESP8266 → 串口发 >HELLO
 
 ### 阶段 1：计划
 
-在 `firmware/integrated_test/PLAN.md` 写双模式方案。中途经过多轮审阅和修正：
+双模式方案的详细设计文档（PLAN.md），中途经过多轮审阅和修正：
 
 1. 初版：NPN 三极管检测 → 被否决（硬件无法区分）
 2. 二版：软件握手 → 通过
@@ -66,10 +68,10 @@ ESP8266 → 串口发 >HELLO
 不合并成单 .ino，拆成三层：
 
 ```
-firmware/esp8266_dial_v2/
-├── esp8266_dial_v2.ino    主程序（模式状态机 + 握手）
-├── encoder.h / .cpp        编码器 + 按键（从 encoder_test 抽出）
-└── wifi_module.h / .cpp    WiFi AP + UDP + Web（从 esp8266_dial 抽出）
+firmware/esp8266_dial/
+├── esp8266_dial.ino    主程序（模式状态机 + 握手）
+├── encoder.h / .cpp    编码器 + 按键（从早期测试固件 encoder_test 抽出）
+└── wifi_module.h / .cpp  WiFi AP + UDP + Web（从 v1 旧固件抽出）
 ```
 
 回调解耦：`encoder` 模块产生事件 → 主程序按 mode 决定走串口还是 UDP。
@@ -113,7 +115,7 @@ Ubuntu 端联调方案：
 
 | 消息 | 方向 | 时机 |
 |------|------|------|
-| `>BOOT integrated_test` | ESP→PC | 启动 |
+| `>BOOT` | ESP→PC | 启动 |
 | `>HELLO\n` | ESP→PC | BOOT 每 500ms；WIRELESS 每 10s |
 | `>PING\n` | ESP→PC | WIRED 每 2s 心跳 |
 | `ACK\n` | PC→ESP | 响应 HELLO 或 PING |
@@ -149,10 +151,10 @@ EC11 GND ── GND
 
 ## 最终文件清单
 
-### 固件
+### 固件（仓库内）
 ```
-firmware/esp8266_dial_v2/
-├── esp8266_dial_v2.ino
+firmware/esp8266_dial/
+├── esp8266_dial.ino
 ├── encoder.h / .cpp
 ├── wifi_module.h / .cpp
 ├── PLAN.md
@@ -161,7 +163,7 @@ firmware/esp8266_dial_v2/
 
 编译占用：Flash 26%，RAM 36%，IRAM 92%。
 
-### PC 端
+### PC 端（仓库内）
 ```
 pc-client/
 ├── dial_listener.py          双线程（Serial + UDP）
@@ -173,13 +175,13 @@ pc-client/
 └── README.md
 ```
 
-### 保留的历史版本
+### 本地保留的历史版本（未上传 GitHub）
 ```
 firmware/
-├── encoder_test/     独立测试固件，配合 encoder_monitor.py
-├── esp8266_dial/     v1 旧固件，保留作回滚参考
-├── integrated_test/  开发中间产物（已复制到 v2）
-└── esp8266_dial_v2/  正式版
+├── encoder_test/         独立测试固件，配合 encoder_monitor.py
+├── esp8266_dial_v1/      v1 旧固件，保留作回滚参考
+├── integrated_test_v1/   开发中间产物，v1 到 v1.0.0 演进阶段
+└── esp8266_dial/         正式版（本仓库 v1.0.0）
 ```
 
 ---
@@ -221,8 +223,7 @@ firmware/
 
 ## 参考
 
-- 项目路径：`/home/zza/esp8266-dial/`
-- v2 固件：`firmware/esp8266_dial_v2/`
-- PC 端：`pc-client/`
-- 详细设计：`firmware/esp8266_dial_v2/PLAN.md`
+- GitHub 仓库：https://github.com/A-BOT-GIT/esp8266-dial
+- 详细设计：`firmware/esp8266_dial/PLAN.md`
+- 本地工作目录：`/home/zza/esp8266-dial/`
 - 会话记录：`/home/zza/.claude/projects/-home-zza/9cc90569-d840-4565-b3dd-218286cb1c08.jsonl`
