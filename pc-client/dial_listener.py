@@ -203,11 +203,11 @@ class SerialReader(threading.Thread):
     def __init__(self, runner: ActionRunner):
         super().__init__(daemon=True, name="serial")
         self.runner = runner
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._ser = None
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self):
         if serial is None:
@@ -216,13 +216,13 @@ class SerialReader(threading.Thread):
 
         log.info("开始扫描 ESP8266 串口...")
         scan_count = 0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             port = self._find_port()
             if port is None:
                 scan_count += 1
                 if scan_count % 15 == 1:
                     log.info("未检测到 ESP8266 串口，继续扫描...")
-                self._stop.wait(2.0)
+                self._stop_event.wait(2.0)
                 continue
             scan_count = 0
 
@@ -254,7 +254,7 @@ class SerialReader(threading.Thread):
                 # 失去有线连接，但 UDP 还能收 → 如果处于 WIRED 就降级到 DISCONNECTED
                 if STATE.mode == State.MODE_WIRED:
                     STATE.set_mode(State.MODE_DISCONNECTED)
-                self._stop.wait(2.0)
+                self._stop_event.wait(2.0)
 
     def _find_port(self):
         try:
@@ -271,7 +271,7 @@ class SerialReader(threading.Thread):
         assert ser is not None
         buf = b""
         MAX_BUF = 8192  # 防止对端狂发无 \n 的垃圾导致内存膨胀
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 chunk = ser.read(1)
             except serial.SerialException:
@@ -332,11 +332,11 @@ class UDPReader(threading.Thread):
     def __init__(self, runner: ActionRunner):
         super().__init__(daemon=True, name="udp")
         self.runner = runner
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._sock = None
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
         if self._sock:
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
@@ -359,7 +359,7 @@ class UDPReader(threading.Thread):
         self._sock.settimeout(None)
         log.info("UDP 监听 %d", UDP_PORT)
 
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 data, addr = self._sock.recvfrom(1024)
             except OSError:
