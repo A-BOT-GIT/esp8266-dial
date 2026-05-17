@@ -2,3 +2,5 @@ pynput>=1.7.6
 pyserial>=3.5
 pystray>=0.19.4
 Pillow>=9.0.0
+pycaw>=20230407
+comtypes>=1.2.0

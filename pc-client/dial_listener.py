@@ -37,6 +37,13 @@ except ImportError:
     Image = None
     ImageDraw = None
 
+try:
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IMMDeviceEnumerator, EDataFlow, ERole, AudioDevice
+    from comtypes import CLSCTX_ALL, CoCreateInstance, CLSCTX_INPROC_SERVER
+    _HAS_PYCAW = True
+except ImportError:
+    _HAS_PYCAW = False
+
 # ── Windows 控制台 QuickEdit 禁用（--console 打包时才用到） ──
 if sys.platform == "win32" and sys.stdout is not None and sys.stdout.isatty():
     try:
@@ -158,10 +165,86 @@ class State:
 STATE = State()
 
 
+# ── 音频控制（pycaw → 始终操作当前默认设备） ────────────
+VOLUME_STEP = 2  # 每次旋转调节 2%（/100 单位）
+
+class AudioController:
+    """封装 pycaw：直接读写 Windows 当前默认音频设备的主音量。"""
+
+    def __init__(self):
+        self._vol_iface = None
+        self._last_dev_id = None
+        self._last_check_time = 0.0
+
+    def _ensure_active_device(self):
+        """
+        检查并确保绑定到当前的默认音频输出设备。
+        由于设备切换可能发生，我们加上节流：如果在 1.5 秒内发生过连续旋转，就复用当前接口，不重复查询。
+        """
+        if not _HAS_PYCAW:
+            return False
+
+        now = time.time()
+        # 如果距离上次检查时间小于 1.5 秒且我们已经有一个有效的接口，就继续复用
+        # 这样在连续旋转旋钮时，不会每一步都触发 GetSpeakers()，减小 COM 调用的开销
+        if self._vol_iface is not None and (now - self._last_check_time) < 1.5:
+            self._last_check_time = now
+            return True
+
+        try:
+            dev = AudioUtilities.GetSpeakers()
+            if dev is None:
+                log.warning("未找到默认音频输出设备")
+                self._vol_iface = None
+                return False
+
+            cur_dev_id = dev.id
+            # 只有当设备发生了改变，或者这是第一次初始化时，才重新 Activate
+            if self._vol_iface is None or cur_dev_id != self._last_dev_id:
+                self._vol_iface = dev.EndpointVolume
+                self._last_dev_id = cur_dev_id
+                log.info("绑定音频控制到当前默认设备: %s", dev.FriendlyName)
+
+            self._last_check_time = now
+            return True
+        except Exception as e:
+            log.warning("获取或激活默认音频设备失败: %s", e)
+            self._vol_iface = None
+            self._last_dev_id = None
+            return False
+
+    def change_volume(self, delta: int):
+        """delta 正数=增大，负数=减小，单位为百分点"""
+        if not self._ensure_active_device():
+            return False
+
+        try:
+            vol = self._vol_iface.GetMasterVolumeLevelScalar()
+            new = max(0.0, min(1.0, vol + delta / 100.0))
+            self._vol_iface.SetMasterVolumeLevelScalar(new, None)
+            return True
+        except Exception:
+            self._vol_iface = None  # 出错后清空，下次重试
+            return False
+
+    def mute_toggle(self):
+        if not self._ensure_active_device():
+            return False
+
+        try:
+            cur = self._vol_iface.GetMute()
+            self._vol_iface.SetMute(not cur, None)
+            return True
+        except Exception:
+            self._vol_iface = None
+            return False
+
+
 # ── 动作执行 ────────────────────────────────────────────
 class ActionRunner:
     def __init__(self):
         self.keyboard = Controller()
+        self.audio = AudioController()
         self._lock = threading.Lock()
 
     def run(self, action: str, source: str):
@@ -172,6 +255,20 @@ class ActionRunner:
                     self._win_d()
                     STATE.record_event("longpress")
                     return
+
+                # 音量改用 pycaw 直接操作当前默认设备
+                if action == "left" and _HAS_PYCAW:
+                    if self.audio.change_volume(-VOLUME_STEP):
+                        log.info("[%s] left → 音量减小 (pycaw)", source)
+                        STATE.record_event(action)
+                        return
+                if action == "right" and _HAS_PYCAW:
+                    if self.audio.change_volume(+VOLUME_STEP):
+                        log.info("[%s] right → 音量增大 (pycaw)", source)
+                        STATE.record_event(action)
+                        return
+
+                # fallback：pycaw 不可用时走媒体键（原行为）
                 if action in KEY_MAP:
                     key, desc = KEY_MAP[action]
                     log.info("[%s] %s → %s", source, action, desc)
